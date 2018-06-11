@@ -1,0 +1,808 @@
+---
+title: "Analysis of Credit Card Default"
+author: "Hafid Pradipta"
+date: "April 17, 2018"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+
+library(readxl)
+library(tidyverse)
+library(ggplot2)
+library(leaps)
+library(FactoMineR)
+library(factoextra)
+library(MASS)
+library(biotools)
+library(randomForest)
+library(gridExtra)
+library(MVN)
+library(rcompanion)
+library(ROCR)
+credit <- read_excel("C:/Users/Hafid Pradipta/OneDrive/ITEC 621/credit card default/creditdefault.xls")
+credit
+```
+
+```{r tidy up the data,message=FALSE}
+#tidy up the data
+credit2 <- credit
+credit <- credit %>%
+  mutate(SEX=ifelse(credit$SEX==1,"male","female"))
+credit$MARRIAGE <- as.factor(credit$MARRIAGE)
+credit$MARRIAGE <- credit$MARRIAGE %>% 
+  recode(`1` = "Married",
+         `2` = "Single",
+         `3` = "Others")
+
+credit$EDUCATION <- as.factor(credit$EDUCATION)
+
+credit$EDUCATION <-  credit$EDUCATION %>% 
+  recode(`1`= "Gradschool",
+         `2` = "University",
+         `3` = "Highschool",
+         `4` = "Others",
+         `5` = "Others",
+         `6` = "Others")
+colnames(credit)[25] <- ("defaultnm")
+credit <- credit %>% 
+  mutate(defaultnm = ifelse(credit$defaultnm==1, "default","nondefault"))
+
+hist(credit$BILL_AMT1)
+```
+
+
+```{r convert NT to USD}
+#conver NTdollar to US dollar
+credit <- credit %>% 
+  mutate(limbalusd =LIMIT_BAL*0.034)
+
+credit <- credit %>% 
+  mutate(flimbalusd = cut(limbalusd, c(0, 5000, 15000, 20000 ,25000,30000, Inf), right = FALSE,
+                          labels = c("0-5k","5-15k","15-20k","20-25k","25-30k","30k")))
+
+credit <- credit %>%
+  mutate(billamt1 = BILL_AMT1*0.034,
+         billamt2 = BILL_AMT2*0.034,
+         billamt3 = BILL_AMT3*0.034,
+         billamt4 = BILL_AMT4*0.034,
+         billamt5 = BILL_AMT5*0.034,
+         billamt6 = BILL_AMT6*0.034,
+         payamt1 = PAY_AMT1*0.034,
+         payamt2 = PAY_AMT2*0.034,
+         payamt3 = PAY_AMT3*0.034,
+         payamt4 = PAY_AMT4*0.034,
+         payamt5 = PAY_AMT5*0.034,
+         payamt6 = PAY_AMT6*0.034)
+
+# Normality Test
+n <- length(credit$defaultnm)
+cnum <- credit[,c(26, 28:39)]
+ZZ <- sample(n,5000)
+cnumnorm <- mvn(data = cnum[ZZ,], univariateTest = "SW", univariatePlot = TRUE)
+cnumnorm$univariateNormality
+scnum <- scale(cnum, scale = TRUE)
+scnumnorm <- mvn(data = scnum[ZZ,], univariateTest = "SW", univariatePlot = TRUE)
+ccnum <- scale(cnum, scale = FALSE, center = TRUE)
+ccnumnorm <- mvn(data = scnum[ZZ,], univariateTest = "SW")
+nresult <- tibble(names = colnames(cnum),Skew=cnumnorm$Descriptives$Skew, Kurt=cnumnorm$Descriptives$Kurtosis,
+                  ScaleSkew=scnumnorm$Descriptives$Skew, ScaleKurt=scnumnorm$Descriptives$Kurtosis,
+                  CenterSkew=ccnumnorm$Descriptives$Skew, CenterKurt=ccnumnorm$Descriptives$Kurtosis)
+
+
+#Tukey Transformation
+a <- transformTukey(cnum$limbalusd[ZZ],plotit=FALSE)#0.25
+ab1 <- transformTukey(cnum$billamt1[ZZ],plotit=FALSE)#1
+ab2 <- transformTukey(cnum$billamt2[ZZ],plotit=FALSE)#1
+ab3<- transformTukey(cnum$billamt3[ZZ],plotit=FALSE)#1
+ab4 <- transformTukey(cnum$billamt4[ZZ],plotit=FALSE)#1
+ab5<- transformTukey(cnum$billamt5[ZZ],plotit=FALSE)#1
+ab6 <- transformTukey(cnum$billamt6[ZZ],plotit=FALSE)#1
+ap1 <- transformTukey(cnum$payamt1[ZZ],plotit=FALSE)#0.3
+ap2 <- transformTukey(cnum$payamt2[ZZ],plotit=FALSE)#0.25
+ap3 <- transformTukey(cnum$payamt3[ZZ],plotit=FALSE)#0.25
+ap4 <- transformTukey(cnum$payamt4[ZZ],plotit=FALSE)#0.25
+ap5 <- transformTukey(cnum$payamt5[ZZ],plotit=FALSE)#0.25
+ap6 <- transformTukey(cnum$payamt6[ZZ],plotit=FALSE)#0.25
+
+#transformation to make it more normal
+cnumt <- data.frame(cnum[,1]^0.25,
+          cnum[,2:7],
+          cnum[,8:13]^0.25)
+cnumtnorm <- mvn(data = cnumt[ZZ,],univariateTest = "SW")
+cnumtnorm$univariateNormality
+creditt <- credit
+creditt[,26:39] <- cnumt
+creditt$flimbalusd <- credit$flimbalusd
+names(creditt)
+```
+
+```{r conversion to long dataset,message=FALSE }
+
+abc <- credit %>% gather(paste0("billamt",1:6), key = "billperiod", value = "billamount")
+abc <- abc %>% gather(paste0("payamt",1:6), key = "payperiod", value = "payamount")
+longdata <- abc[,c(25,28:31)]
+
+credit[,7:12] <- credit[,7:12]+2
+def <- credit %>% gather(PAY_0,paste0("PAY_",2:6), key = "payperiod", value = "paypunc")
+longdata2 <- def[,34:35]
+
+```
+
+
+
+```{r default visualization}
+#data visualization for default group. 
+default <- credit %>% filter(defaultnm == "default")
+
+d.sex<- default %>% group_by(SEX) %>% 
+  summarise(count = n()) %>% 
+  ggplot(aes(x =SEX, y = count), label = count)+
+  geom_bar(stat="identity", fill = "midnightblue")+
+  geom_text(aes(label = round(count/sum(count),2)), size=3, vjust = -0.25)+
+  xlab("Gender")+
+  ylab("Number of People")+
+  theme(axis.text.x = element_text(angle = 325, hjust = 0))+
+  ggtitle("Default on Gender")
+
+d.edu <- default %>% group_by(EDUCATION) %>% 
+  summarise(count = n()) %>% 
+  ggplot(aes(x =EDUCATION, y = count), label = count)+
+  geom_bar(stat="identity",fill = "midnightblue")+
+  geom_text(aes(label = round(count/sum(count),2)), size = 3, vjust = -0.25)+
+  ylab("Number of People")+
+  theme(axis.text.x = element_text(angle = 325, hjust = 0))+
+  ggtitle("Default on Education")
+
+d.mar <-default %>% group_by(MARRIAGE) %>% 
+  summarise(count = n()) %>% 
+  ggplot(aes(x =MARRIAGE, y = count))+
+  geom_bar(stat="identity", fill = "midnightblue", position = position_stack())+
+  geom_text(aes(label = round(count/sum(count),2)), size = 3, vjust = -0.25)+
+  ylab("Number of People")+
+  xlab("Marital Status")+
+   theme(axis.text.x = element_text(angle = 325, hjust = 0))+
+  ggtitle("Default on Marital")
+
+d.sex
+d.edu
+d.mar
+```
+
+```{r EDA,message=FALSE}
+#cxredit limit visualization
+credit %>% 
+  group_by(flimbalusd) %>% 
+  summarise(count = n()) %>% 
+  ggplot(aes(x =flimbalusd, y = count), label = count)+
+  geom_bar(stat="identity", fill = "midnightblue")+
+  geom_text(aes(label = round(count/sum(count),2)), size = 5, vjust = -0.25)+
+  theme(legend.position="none")+
+  xlab("Limit Category")+
+  ylab("Amount of limit in USD")+
+  ggtitle("Credit Limit in USD")
+
+```
+
+We split the limit balance per 5k and based on the graph, most of the customers has limit balance between $5000 - %15000 which account for 95% of all customers. 
+
+```{r average payment and average bill,message=FALSE}
+
+#average bill amount, bill paid and lateness of the payment visualization. 
+
+badef <- longdata %>% 
+  filter(defaultnm=="default") %>% 
+  group_by(billperiod) %>% 
+  summarise(average= mean(billamount))
+bandef <- longdata %>% 
+  filter(defaultnm=="nondefault") %>% 
+  group_by(billperiod) %>% 
+  summarise(average= mean(billamount))
+
+diffba <- badef %>% left_join(bandef, by = "billperiod")
+colnames(diffba)[2:3] <- c("default","nondefault")
+diffba$billperiod <- diffba$billperiod %>% 
+  recode("billamt1"="bperiod1",
+         "billamt2"="bperiod2",
+         "billamt3"="bperiod3",
+         "billamt4"="bperiod4",
+         "billamt5"="bperiod5",
+         "billamt6"="bperiod6")
+
+
+diffba %>% gather(default, nondefault, key= "Type", value = "amount") %>% 
+  ggplot(aes(x= billperiod, y=amount))+
+  geom_point(aes(color = Type, size = amount))+
+  geom_text(aes(label = round(amount,2)), vjust = -0.5)+
+  guides(size = FALSE)+
+  xlab("Period of Payment")+
+  ylab("Average of Bill in USD")+
+  ggtitle("Average Bill per Period")
+
+
+ppdef <- longdata %>% 
+  filter(defaultnm=="default") %>% 
+  group_by(payperiod) %>% 
+  summarise(average = mean(payamount))
+
+ppnondef <- longdata %>% 
+  filter(defaultnm=="nondefault") %>% 
+  group_by(payperiod) %>% 
+  summarise(average = mean(payamount))
+
+
+diffpp <- ppdef %>% left_join(ppnondef, by = "payperiod")
+colnames(diffpp)[2:3] <- c("default","nondefault")
+########################################################################
+diffpp$payperiod <- as.factor(diffpp$payperiod)
+diffpp$payperiod <- diffpp$payperiod %>% 
+  recode("payamt1"="pperiod1",
+         "payamt2"="pperiod2",
+         "payamt3"="pperiod3",
+         "payamt4"="pperiod4",
+         "payamt5"="pperiod5",
+         "payamt6"="pperiod6")
+
+diffpp %>% gather(default, nondefault, key= "Type", value = "amount") %>% 
+  ggplot(aes(x= payperiod, y=amount))+
+  geom_point(aes(color = Type, size = amount))+
+  guides(size = FALSE)+
+  geom_text(aes(label = round(amount,2)), vjust = -0.5)+
+  xlab("Period of Payment")+
+  ylab("Average of Payment in USD")+
+  ggtitle("Average Payment per Period")
+
+
+longdata2 %>% 
+  group_by(payperiod) %>% 
+  summarise(average = mean(paypunc)) %>% 
+   ggplot(aes(x= payperiod, y=average))+
+  geom_point(aes( size = average))+
+  guides(size = FALSE)+
+  geom_text(aes(label = round(average,2)), vjust = -0.5)+
+  xlab("Period of Payment")+
+  ylab("Average of Payment in USD")+
+  ggtitle("Average Payment per Period")
+
+```
+
+
+```{r correlation matrix,message=FALSE}
+
+library(reshape2)
+creditnum <- credit[,c(7:12,26,28:39)]
+cormat <- round(cor(creditnum),2)
+melted_cormat <- melt(cormat)
+
+# Get lower triangle of the correlation matrix
+get_lower_tri<-function(cormat){
+  cormat[upper.tri(cormat)] <- NA
+  return(cormat)
+}
+# Get upper triangle of the correlation matrix
+get_upper_tri <- function(cormat){
+  cormat[lower.tri(cormat)]<- NA
+  return(cormat)
+}
+upper_tri <- get_upper_tri(cormat)
+# Melt the correlation matrix
+melted_cormat <- melt(upper_tri, na.rm = TRUE)
+# Heatmap
+library(ggplot2)
+
+ggheatmap <- ggplot(melted_cormat, aes(Var2, Var1, fill = value))+
+  geom_tile(color = "white")+
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Pearson\nCorrelation") +
+  theme_minimal()+ # minimal theme
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                   size = 12, hjust = 1))+
+  coord_fixed()
+
+####reorder
+reorder_cormat <- function(cormat){
+  # Use correlation between variables as distance
+  dd <- as.dist((1-cormat)/2)
+  hc <- hclust(dd)
+  cormat <-cormat[hc$order, hc$order]
+}
+
+cormat <- reorder_cormat(cormat)
+upper_tri <- get_upper_tri(cormat)
+# Melt the correlation matrix
+melted_cormat <- melt(upper_tri, na.rm = TRUE)
+# Create a ggheatmap
+ggheatmap <- ggplot(melted_cormat, aes(Var2, Var1, fill = value))+
+  geom_tile(color = "white")+
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Pearson\nCorrelation") +
+  theme_minimal()+ # minimal theme
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                   size = 12, hjust = 1))+
+  coord_fixed()
+
+ggheatmap + 
+  geom_text(aes(Var2, Var1, label = value), color = "black", size = 2) +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    axis.ticks = element_blank(),
+    legend.justification = c(1, 0),
+    legend.position = c(0.6, 0.7),
+    legend.direction = "horizontal")+
+  guides(fill = guide_colorbar(barwidth = 7, barheight = 1,
+                               title.position = "top", title.hjust = 0.5))
+```
+
+
+```{r principal component,message=FALSE}
+#method1
+creditusd <- credit[,c(1:12,25, 26, 28:39)]
+credit
+creditusd <- creditusd %>% mutate(defaultnm = ifelse (defaultnm == "default", 1, 0))
+creditusd$defaultnm <- as.numeric(creditusd$defaultnm)
+prc <- prcomp(creditusd[,-c(1,3:5)], scale = TRUE)
+
+seig1 <- prc$sdev[1]^2/sum(prc$sdev^2)
+seig2 <- prc$sdev[2]^2/sum(prc$sdev^2)
+
+grid <- tibble(y = as.factor(creditusd$defaultnm), pc1 =prc$x[,1], pc2 =  prc$x[,2])
+gs <- sample(nrow(grid), 5000)
+grid <- grid %>% 
+  mutate(y = ifelse(y == 1, "default", "nondefault"))
+
+grid[gs,] %>% ggplot(aes(x = pc1, y = pc2, color = y))+
+  geom_point(alpha = 0.5, size = 2)+
+ xlab (paste("Component1", round(seig1,2), "%"))+
+ylab (paste("Component2", round(seig2,2), "%"))+
+ labs(color = "Status")
+
+```
+
+```{r machine learning,message=FALSE}
+#logistic Regression Initial model
+
+mod1 <- glm(defaultnm~., data = creditusd, family = binomial(link="logit"))
+summary(mod1)
+#defaultnm~ LIMIT_BAL + SEX + Marriage + AGE + PAY_0 + PAY_2 + PAY_3 + billamt1 + payamt1 + payamt2 + payamt4
+
+n <- length(creditusd$defaultnm)
+Z <- sample(n,n/10)
+c.test <- creditusd[Z,]
+mod1.1 <- glm(defaultnm~ LIMIT_BAL + SEX + MARRIAGE + AGE + PAY_0 + PAY_2 + PAY_3 + billamt1 + payamt1 + payamt2 + payamt4 , data = creditusd[-Z,], family = binomial(link = "logit"))
+summary(mod1.1)
+
+prob = predict(mod1.1, data.frame(c.test))
+yespred <- 1*(prob>0.5)
+
+table(creditusd$defaultnm[Z], yespred)
+log.in <- mean( creditusd$defaultnm[Z] == yespred)
+log.in
+
+attach(creditusd)
+creditusd.prob.test <- predict(mod1.1, creditusd, type ="response")[-Z]
+pred <- prediction(creditusd.prob.test,creditusd$defaultnm[-Z] )
+perf <- performance(pred, "tpr","fpr")
+plot(perf, colorize = TRUE)
+auc=performance(pred, "auc") 
+c(auc@y.name[[1]], auc@y.values[[1]])
+#any kind of threshold will gave the same result
+```
+
+```{r variable selection,message=FALSE}
+
+
+null = glm( defaultnm ~ 1, data=creditusd, family = binomial(link="logit") )
+full = glm( defaultnm ~ ., data=creditusd, family = binomial(link="logit") )
+
+#step( null, scope=list(lower=null, upper=full), direction="forward" )
+
+#glm(formula = defaultnm ~ PAY_0 + LIMIT_BAL + PAY_3 + payamt1 + 
+ #   billamt1 + MARRIAGE + EDUCATION + payamt2 + billamt3 + PAY_2 + 
+  #  SEX + PAY_5 + AGE + payamt4 + payamt5 + payamt6 + payamt3 + 
+   # billamt2, family = binomial(link = "logit"), data = creditusd)
+
+#step( full, scope=list(lower=null, upper=full), direction="backward" )
+#glm(formula = defaultnm ~ LIMIT_BAL + SEX + EDUCATION + MARRIAGE + 
+    #AGE + PAY_0 + PAY_2 + PAY_3 + PAY_5 + billamt1 + billamt2 + 
+   # billamt5 + payamt1 + payamt2 + payamt3 + payamt4 + payamt5 + 
+   # payamt6, family = binomial(link = "logit"), data = creditusd)
+
+
+modvs <- glm(formula = defaultnm ~ LIMIT_BAL + SEX + EDUCATION + MARRIAGE +     AGE + PAY_0 + PAY_2 + PAY_3 + PAY_5 + billamt1 + billamt2 +    billamt5 + payamt1 + payamt2 + payamt3 + payamt4 + payamt5 +    payamt6, family = binomial(link = "logit"), data = creditusd)
+summary(modvs)
+
+#Education and payamount6 is not significant. 
+#PAY_0 + payamt2 + payamt1 + PAY_3 + payamt6 + payamt5 + billamt3 + PAY_2 + billamt1
+
+modvs2 <- glm(formula = defaultnm ~ LIMIT_BAL + SEX  + MARRIAGE +     AGE + PAY_0 + PAY_2 + PAY_3 + PAY_5 + billamt1 + billamt2 +    billamt5 + payamt1 + payamt2 + payamt3 + payamt4 + payamt5 , family = binomial(link = "logit"), data = creditusd[-Z,])
+
+prob = predict(modvs2, data.frame(c.test))
+yespred <- 1*(prob>0.5)
+table(creditusd$defaultnm[Z], yespred)
+log.vs <- mean( creditusd$defaultnm[Z] == yespred)
+log.vs
+#logistic regression predict 78% correctly
+
+
+
+#TPR = rep(0,100)
+#FPR = rep(0,100)
+#for(k in 1:100){
+#  fit = glm(formula = defaultnm ~ limbalusd + SEX  + MARRIAGE +     AGE + PAY_0 + PAY_2 + PAY_3 + PAY_5 + billamt1 + billamt2 +    billamt5 + payamt1 + payamt2 + payamt3 + payamt4 + payamt5 , family = binomial(link = "logit"), data = creditusd[-Z,])
+#  prob  = predict(fit, data.frame(creditusd[Z,]), type = "response")
+ # Yhat = 1*(prob > k/100)
+  #TPR[k] = sum(Yhat ==1 & defaultnm==1)/ sum(defaultnm==1)
+  #FPR[k] = sum(Yhat ==1 & defaultnm==0)/ sum(defaultnm==0)
+#}
+#plot(FPR, TPR, xlab="False positive rate", ylab="True positive rate", main="ROC curve")
+
+
+
+creditusd.prob.test <- predict(modvs2, creditusd, type ="response")[-Z]
+pred <- prediction(creditusd.prob.test,creditusd$defaultnm[-Z] )
+perf <- performance(pred, "tpr","fpr")
+plot(perf, colorize = TRUE)
+auc=performance(pred, "auc") 
+c(auc@y.name[[1]], auc@y.values[[1]])
+
+```
+
+
+
+##Linear Discriminant Analysis
+
+```{r lda,message=FALSE}
+
+lda.fit <- lda(defaultnm~., data= creditusd, CV = TRUE)
+table(creditusd$defaultnm, lda.fit$class)
+lda.in <- mean(creditusd$defaultnm == lda.fit$class)
+lda.in
+```
+
+
+
+```{r lda vs,message=FALSE}
+lda.fitvs <- lda( defaultnm ~ LIMIT_BAL + SEX  + MARRIAGE + AGE + PAY_0 + PAY_2 + PAY_3 + PAY_5 + billamt1 + billamt2 +    billamt5 + payamt1 + payamt2 + payamt3 + payamt4 + payamt5 , data = creditusd, CV = TRUE)
+table(creditusd$defaultnm, lda.fitvs$class)
+lda.vs <- mean(creditusd$defaultnm == lda.fitvs$class)
+lda.vs
+```
+
+
+
+```{r qda,message=FALSE}
+
+###qda for all variable can't be done due to rank deficiency in one group. It means that the data has too many multicollinearity. 
+
+qda.fitvs <- qda( defaultnm ~ LIMIT_BAL + SEX  + MARRIAGE + AGE + PAY_0 + PAY_2 + PAY_3 + PAY_5 + billamt1 + billamt2 +    billamt5 + payamt1 + payamt2 + payamt3 + payamt4 + payamt5 , data = creditusd, CV = TRUE)
+table(defaultnm, qda.fitvs$class)
+qda.vs<- mean(defaultnm == qda.fitvs$class,na.rm=TRUE)
+qda.vs
+```
+
+
+
+```{r KNN,message=FALSE}
+creditusd2 <- creditusd
+creditusd2[,3:5] <- credit2[,3:5]
+creditusd2 <- creditusd2[,-1]
+creditusd2$defaultnm <- as.factor(creditusd2$defaultnm)
+n = length(creditusd2$defaultnm)
+Z = sample( n, n/10)
+X = model.matrix(defaultnm~., creditusd2)
+Y = creditusd2$defaultnm
+c.train = creditusd2[-Z,]
+c.test = creditusd2[Z,]
+x.train <- X[-Z,]
+x.test <- X[Z,]
+y.train <- Y[-Z]
+y.test <- Y[Z]
+
+library(class)
+knn.result <- knn(x.train, x.test,y.train,3)
+table(y.test, knn.result)
+
+class.rate = rep(0,20)
+for(k in 1:20){
+  knn.result <- knn(x.train, x.test,y.train,k)
+  class.rate[k] <- mean(y.test == knn.result)
+}
+which.max(class.rate)
+plot(class.rate, type = "line", lwd = 4)
+knn.in <- class.rate[which.max(class.rate)]
+knn.in
+```
+
+Non parametric approach of KNN shows that the maximum prediction accuracy is obtained when k =19. It means that using 19 neighborhood to determine the vote of the classification, we are able to predict 79% of default and non default group correctly. 
+
+```{r}
+rf = randomForest(defaultnm ~ ., data=creditusd2, subset=-Z)
+Yhat = predict(rf,creditusd2, type="class")
+mean(Yhat[-Z] != creditusd2$defaultnm[-Z])
+
+cv.err = rep(0,7)
+n.trees= rep(0,7)
+ for (m in 1:7){
+rf.m = randomForest( defaultnm ~ ., data=creditusd2[-Z,], mtry=m )
+opt.trees = which.min(rf.m$err.rate)
+rf.m = randomForest( defaultnm ~ ., data=creditusd2[-Z,], mtry=m, ntree=opt.trees )
+Yhat = predict(rf.m,newdata=creditusd2[Z,], type="class")
+pred.err = mean( (Yhat == creditusd2$defaultnm[Z])^2 )
+cv.err[m] = pred.err 
+n.trees[m] = opt.trees
+ }
+which.min(cv.err)
+n.trees[which.min(cv.err)]
+
+rf.optimal = randomForest(defaultnm~., data = creditusd2, mtry = which.min(cv.err), ntree = n.trees[which.min(cv.err)])
+rf.optimal
+names(rf.optimal)
+rf.optimal$confusion[2,3]
+```
+
+
+
+##conclusion
+
+```{r conclusion,message=FALSE}
+
+result <- tibble(InitialLogistic = log.in, 
+VSLogistic = log.vs,
+InitialLDA = lda.in,
+VSLDA = lda.vs,
+VSQDA = qda.vs,
+InitialKNN = knn.in
+#,randomForest = rf.optimal$confusion[2,3] 
+)
+result
+```
+
+##repeat the method using transformation data
+#method1
+```{r PC2,message=FALSE}
+creditusd <- creditt[,c(1:12,25, 26, 28:39)]
+cnumt2<- creditusd[,c(6:12,14:26)]
+scnumt2 <- scale(cnumt2, scale = TRUE)
+creditusd[,c(6:12,14:26)] <- scnumt2
+creditusd <- creditusd %>% mutate(defaultnm = ifelse (defaultnm == "default", 1, 0))
+creditusd$defaultnm <- as.numeric(creditusd$defaultnm)
+creditusd
+```
+
+
+```{r machine learning2,message=FALSE}
+#logistic Regression Initial model
+creditusd <- creditusd[,-c(1:2)]
+creditusd$defaultnm <- as.factor(creditusd$defaultnm)
+mod1 <- glm(defaultnm~., data = creditusd, family = binomial(link="logit"))
+summary(mod1)
+#defaultnm~ limbalusd + SEX + MARRIAGE + AGE + PAY_0 + PAY_2 + PAY_3 +PAY_5 +PAY_6 + billamt6 + payamt1 + payamt2 + payamt3 + payamt4 + payamt5
+creditusd
+
+n <- length(creditusd$defaultnm)
+Z <- sample(n,n/10)
+c.test <- creditusd[Z,]
+mod1.1 <- glm(defaultnm~ limbalusd + SEX + MARRIAGE + AGE + PAY_0 + PAY_2 + PAY_3 +PAY_5 +PAY_6 + billamt6 + payamt1 + payamt2 + payamt3 + payamt4 + payamt5 , data = creditusd[-Z,], family = binomial(link = "logit"))
+summary(mod1.1)
+
+prob = predict(mod1.1, data.frame(c.test))
+yespred <- 1*(prob>0.5)
+
+table(creditusd$defaultnm[Z], yespred)
+log.in <- mean( creditusd$defaultnm[Z] == yespred)
+log.in
+
+attach(creditusd)
+
+#TPR = rep(0,100)
+#FPR = rep(0,100)
+#for(k in 1:100){
+#  fit = glm(defaultnm~ limbalusd + SEX + MARRIAGE + AGE + PAY_0 + PAY_2 + PAY_3 +PAY_5 +PAY_6 + billamt6 + payamt1 + payamt2 + payamt3 + payamt4 + payamt5 , data = creditusd[-Z,], family = binomial(link = "logit"))
+#  prob  = predict(fit, data.frame(creditusd[Z,]), type = "response")
+#  Yhat = 1*(prob > k/100)
+#  TPR[k] = sum(Yhat ==1 & defaultnm==1)/ sum(defaultnm==1)
+#  FPR[k] = sum(Yhat ==1 & defaultnm==0)/ sum(defaultnm==0)
+#}
+#plot(FPR, TPR, xlab="False positive rate", ylab="True positive rate", main="ROC curve")
+#any kind of threshold will gave the same result
+
+
+
+creditusd.prob.test <- predict(mod1.1, creditusd, type ="response")[-Z]
+pred <- prediction(creditusd.prob.test,creditusd$defaultnm[-Z] )
+perf <- performance(pred, "tpr","fpr")
+plot(perf, colorize = TRUE)
+auc=performance(pred, "auc") 
+c(auc@y.name[[1]], auc@y.values[[1]])
+
+```
+
+
+```{r variable selection2,message=FALSE}
+
+
+null = glm( defaultnm ~ 1, data=creditusd, family = binomial(link="logit") )
+full = glm( defaultnm ~ ., data=creditusd, family = binomial(link="logit") )
+
+#step( null, scope=list(lower=null, upper=full), direction="forward" )
+
+#glm(formula = defaultnm ~ PAY_0 + payamt1 + PAY_4 + billamt6 + 
+ #   payamt4 + MARRIAGE + EDUCATION + limbalusd + billamt2 + payamt3 + 
+  #  PAY_6 + payamt2 + PAY_3 + SEX + billamt5 + payamt5 + PAY_5 + 
+   # AGE + PAY_2, family = binomial(link = "logit"), data = creditusd)
+
+#step( full, scope=list(lower=null, upper=full), direction="backward" )
+
+#glm(formula = defaultnm ~ SEX + EDUCATION + MARRIAGE + AGE + 
+ #   PAY_0 + PAY_2 + PAY_3 + PAY_4 + PAY_5 + PAY_6 + limbalusd + 
+  #  billamt3 + billamt5 + billamt6 + payamt1 + payamt2 + payamt3 + 
+   # payamt4 + payamt5, family = binomial(link = "logit"), data = creditusd)
+
+
+modvs <- glm(formula = defaultnm ~ SEX + EDUCATION + MARRIAGE + AGE + 
+PAY_0 + PAY_2 + PAY_3 + PAY_4 + PAY_5 + PAY_6 + limbalusd + 
+  billamt3 + billamt5 + billamt6 + payamt1 + payamt2 + payamt3 + 
+ payamt4 + payamt5, family = binomial(link = "logit"), data = creditusd)
+summary(modvs)
+
+#Education, pay_4, andpay_2 is not significant. 
+#PAY_0 + payamt2 + payamt1 + PAY_3 + payamt6 + payamt5 + billamt3 + PAY_2 + billamt1
+
+modvs2 <- glm(formula = defaultnm ~ SEX  + MARRIAGE + AGE + 
+PAY_0  + PAY_3 + PAY_5 + PAY_6 + limbalusd + 
+  billamt3 + billamt6 + payamt1 + payamt2 + payamt3 + 
+ payamt4 + payamt5, family = binomial(link = "logit"), data = creditusd[-Z,])
+
+prob = predict(modvs2, data.frame(c.test))
+yespred <- 1*(prob>0.5)
+table(creditusd$defaultnm[Z], yespred)
+log.vs <- mean( creditusd$defaultnm[Z] == yespred)
+log.vs
+#logistic regression predict 78% correctly
+
+
+
+#TPR = rep(0,100)
+#FPR = rep(0,100)
+#for(k in 1:100){
+#  fit = glm(formula = defaultnm ~ SEX  + MARRIAGE + AGE + 
+#PAY_0  + PAY_3 + PAY_5 + PAY_6 + limbalusd + 
+#  billamt3 + billamt6 + payamt1 + payamt2 + payamt3 + 
+# payamt4 + payamt5, family = binomial(link = "logit"), data = creditusd[-Z,])
+ # prob  = predict(fit, data.frame(creditusd[Z,]), type = "response")
+  #Yhat = 1*(prob > k/100)
+  #TPR[k] = sum(Yhat ==1 & defaultnm==1)/ sum(defaultnm==1)
+  #FPR[k] = sum(Yhat ==1 & defaultnm==0)/ sum(defaultnm==0)
+#}
+#plot(FPR, TPR, xlab="False positive rate", ylab="True positive rate", main="ROC curve")
+#we can use any kind of threshold
+
+
+
+creditusd.prob.test <- predict(modvs2, creditusd, type ="response")[-Z]
+pred <- prediction(creditusd.prob.test,creditusd$defaultnm[-Z] )
+perf <- performance(pred, "tpr","fpr")
+plot(perf, colorize = TRUE)
+auc=performance(pred, "auc") 
+c(auc@y.name[[1]], auc@y.values[[1]])
+```
+
+##Linear Discriminant Analysis
+
+```{r lda2,message=FALSE}
+
+lda.fit <- lda(defaultnm~., data= creditusd, CV = TRUE)
+table(creditusd$defaultnm, lda.fit$class)
+lda.in <- mean(creditusd$defaultnm == lda.fit$class)
+lda.in
+```
+
+
+
+```{r lda vs2,message=FALSE}
+lda.fitvs <- lda( defaultnm ~ SEX + EDUCATION + MARRIAGE + AGE + 
+ PAY_0 + PAY_2 + PAY_3 + PAY_4 + PAY_5 + PAY_6 + limbalusd + 
+   billamt3 + billamt5 + billamt6 + payamt1 + payamt2 + payamt3 + 
+  payamt4 + payamt5 , data = creditusd, CV = TRUE)
+table(creditusd$defaultnm, lda.fitvs$class)
+lda.vs <- mean(creditusd$defaultnm == lda.fitvs$class)
+lda.vs
+```
+
+Both Linead Discriminant Analysis based on all variables and variable selection give us 81.1% of prediction accuracy. 
+
+```{r qda2,message=FALSE}
+
+###qda for all variable can't be done due to rank deficiency in one group. It means that the data has too many multicollinearity. 
+
+qda.fitvs <- qda( defaultnm ~ limbalusd + SEX  + MARRIAGE + AGE + PAY_0 + PAY_2 + PAY_3 + PAY_5 + billamt1 + billamt2 +    billamt5 + payamt1 + payamt2 + payamt3 + payamt4 + payamt5 , data = creditusd, CV = TRUE)
+table(defaultnm, qda.fitvs$class)
+qda.vs<- mean(defaultnm == qda.fitvs$class,na.rm=TRUE)
+qda.vs
+```
+
+
+```{r KNN2,message=FALSE}
+creditusd2 <- creditusd
+creditusd2[,3:5] <- credit2[,3:5]
+creditusd2 <- creditusd2[,-1]
+creditusd2$defaultnm <- as.factor(creditusd2$defaultnm)
+n = length(creditusd2$defaultnm)
+Z = sample( n, n/10)
+X = model.matrix(defaultnm~., creditusd2)
+Y = creditusd2$defaultnm
+c.train = creditusd2[-Z,]
+c.test = creditusd2[Z,]
+x.train <- X[-Z,]
+x.test <- X[Z,]
+y.train <- Y[-Z]
+y.test <- Y[Z]
+
+library(class)
+knn.result <- knn(x.train, x.test,y.train,3)
+table(y.test, knn.result)
+
+class.rate = rep(0,20)
+for(k in 1:20){
+  knn.result <- knn(x.train, x.test,y.train,k)
+  class.rate[k] <- mean(y.test == knn.result)
+}
+which.max(class.rate)
+plot(class.rate, type = "line", lwd = 4)
+knn.in <- class.rate[which.max(class.rate)]
+knn.in
+```
+
+
+
+```{r random forest2,message=FALSE}
+
+rf = randomForest(defaultnm ~ ., data=creditusd2, subset=-Z)
+Yhat = predict(rf,creditusd2, type="class")
+mean(Yhat[-Z] != creditusd2$defaultnm[-Z])
+
+cv.err = rep(0,7)
+n.trees= rep(0,7)
+ for (m in 1:7){
+rf.m = randomForest( defaultnm ~ ., data=creditusd2[-Z,], mtry=m )
+opt.trees = which.min(rf.m$err.rate)
+rf.m = randomForest( defaultnm ~ ., data=creditusd2[-Z,], mtry=m, ntree=opt.trees )
+Yhat = predict(rf.m,newdata=creditusd2[Z,], type="class")
+pred.err = mean( (Yhat == creditusd2$defaultnm[Z])^2 )
+cv.err[m] = pred.err 
+n.trees[m] = opt.trees
+ }
+which.min(cv.err)
+n.trees[which.min(cv.err)]
+
+rf.optimal = randomForest(defaultnm~., data = creditusd2, mtry = which.min(cv.err), ntree = n.trees[which.min(cv.err)])
+rf.optimal
+names(rf.optimal)
+rf.optimal$confusion[2,3]
+```
+
+
+
+##conclusion
+
+```{r conclusion2,message=FALSE}
+
+result2 <- tibble(InitialLogistic = log.in, 
+VSLogistic2 = log.vs,
+InitialLDA2 = lda.in,
+VSLDA2 = lda.vs,
+VSQDA2 = qda.vs,
+InitialKNN2 = knn.in
+,randomForest = rf.optimal$confusion[2,3] 
+)
+result
+result2
+```
